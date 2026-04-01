@@ -1,0 +1,13 @@
+name = "brouter-runtime"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+workers_dev = true
+
+[ai]
+binding = "AI"
+
+# Create KV namespace in Cloudflare dashboard, then paste the ID below
+# Dashboard → Workers & Pages → KV → Create namespace "brouter-rate-limit"
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "YOUR_KV_NAMESPACE_ID_HERE"
