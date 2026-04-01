@@ -14,6 +14,7 @@ export interface Env {
   BROUTER_CALLBACK_SECRET: string
   AI: any
   RATE_LIMIT_KV?: KVNamespace
+  LLM_MODEL?: string  // override via env var — no redeploy needed to switch models
 }
 
 // ====================== TYPES ======================
@@ -28,6 +29,7 @@ interface LoopPayload {
     balance_sats: number
   }
   feed: FeedItem[]
+  open_markets?: OpenMarket[]
   context: {
     your_recent_comments: any[]
     mentions_of_you: any[]
@@ -51,6 +53,14 @@ interface FeedItem {
   claimed_prob?: number
   market_id?: string
   created_at: string
+}
+
+interface OpenMarket {
+  id: string
+  title: string
+  description?: string
+  domain?: string
+  resolves_at?: string
 }
 
 interface Position {
@@ -90,11 +100,13 @@ const ALLOWED_AGENTS = new Set<string>([
   '3s6OlxvZAF-IvDXS90KHP',   // Innovator
 ])
 
-// LLM model — switch to llama-3.1-8b-instruct-fp8-fast for higher volume / free tier
-const LLM_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+// LLM model — override via LLM_MODEL env var without redeploying
+// Switch to @cf/meta/llama-3.1-8b-instruct-fp8-fast when hitting free tier limits at scale
+const DEFAULT_LLM_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
 
-// Max calls per agent per day (free tier: ~1000 agents at 2 calls/day stays free)
-const MAX_CALLS_PER_DAY = 2
+// Max calls per agent per day
+// Free tier ceiling: ~250 agents at 6 calls/day. Raise limit or switch model when scaling.
+const MAX_CALLS_PER_DAY = 6
 
 // ====================== RATE LIMITING ======================
 
@@ -188,21 +200,35 @@ function buildUserMessage(payload: LoopPayload): string {
         (f.claimed_prob ? ` — claimed prob: ${(f.claimed_prob * 100).toFixed(0)}%` : '') +
         (f.author_calibration ? ` — author calibration: ${JSON.stringify(f.author_calibration)}` : '')
       ).join('\n')}`
-    : '\nFeed is empty.'
+    : '\nFeed is empty — no signals from other agents yet.'
 
   const mentionsContext = context.mentions_of_you?.length > 0
     ? `\nMentions of you:\n${context.mentions_of_you.slice(0, 5).map((m: any) => ` - ${JSON.stringify(m)}`).join('\n')}`
     : ''
 
+  const openMarketsContext = payload.open_markets && payload.open_markets.length > 0
+    ? `\nOpen markets you can stake on or post signals about:\n${payload.open_markets.slice(0, 5).map(m =>
+        ` [${m.id}] "${m.title}"` +
+        (m.domain ? ` (${m.domain})` : '') +
+        (m.resolves_at ? ` — resolves ${m.resolves_at}` : '')
+      ).join('\n')}`
+    : ''
+
+  const proactiveInstruction = feed.length === 0
+    ? `\nIMPORTANT: The feed is empty. You must take at least one proactive action — post a signal on an open market, stake on a position you have conviction on, or post a job for another agent. Do NOT return empty actions.`
+    : `\nIf you have a strong view, take action. Otherwise return empty actions.`
+
   return `You have ${agent.balance_sats} sats available.
 Action costs: comment = ${action_costs.comment} sats, vote = ${action_costs.vote} sats.
-Maximum 3 actions per loop. Return empty actions if nothing warrants a response.
+Maximum 3 actions per loop.
 ${calibrationContext}
 ${positionContext}
 ${feedContext}
 ${mentionsContext}
+${openMarketsContext}
+${proactiveInstruction}
 
-Decide what actions to take, if any. Return a JSON object with this EXACT structure:
+Return a JSON object with this EXACT structure:
 {
   "reasoning": "brief explanation of your decision",
   "actions": [
@@ -216,7 +242,6 @@ Valid action types:
 - stake: { type, market_id, direction ("yes"|"no"), amount_sats (min 100) }
 - signal: { type, post_id, direction ("yes"|"no"), claimed_prob (0.0–1.0), body (max 280 chars) }
 
-Return { "reasoning": "nothing to act on", "actions": [] } if appropriate.
 Only return valid JSON. No markdown, no explanation outside the JSON.`
 }
 
@@ -260,8 +285,9 @@ export default {
         service: 'brouter-runtime',
         status: 'live',
         version: '1.0.0',
-        model: LLM_MODEL,
+        model: env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
         agents: ALLOWED_AGENTS.size,
+        max_calls_per_day: MAX_CALLS_PER_DAY,
       })
     }
 
@@ -316,7 +342,9 @@ export default {
 
     let rawResponse: string
     try {
-      const result = await env.AI.run(LLM_MODEL, {
+      const model = env.LLM_MODEL ?? DEFAULT_LLM_MODEL
+      console.log(`[runtime][${payload.agent.handle}] calling ${model}`)
+      const result = await env.AI.run(model, {
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user',   content: userMessage },
