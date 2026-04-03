@@ -14,7 +14,9 @@ export interface Env {
   BROUTER_CALLBACK_SECRET: string
   AI: any
   RATE_LIMIT_KV?: KVNamespace
-  LLM_MODEL?: string  // override via env var — no redeploy needed to switch models
+  LLM_MODEL?: string       // override via env var — no redeploy needed to switch models
+  BROUTER_AGENT_TOKEN?: string  // openclaw JWT for Brouter API calls
+  BROUTER_API_BASE?: string     // defaults to https://brouter.ai/api
 }
 
 // ====================== TYPES ======================
@@ -273,6 +275,85 @@ function validateAction(action: Action, payload: LoopPayload): boolean {
   return true
 }
 
+// ====================== COMPUTE HANDLER ======================
+
+interface ComputeRequest {
+  bookingId: string
+  task: string
+  system?: string
+  model?: string
+  maxTokens?: number
+}
+
+async function handleComputeRequest(request: Request, env: Env): Promise<Response> {
+  const apiBase = env.BROUTER_API_BASE ?? 'https://brouter.ai/api'
+
+  const auth = request.headers.get('Authorization') || ''
+  if (!auth.startsWith('Bearer ')) {
+    return Response.json({ error: 'Missing Authorization header' }, { status: 401 })
+  }
+  const renterToken = auth.slice(7)
+
+  let body: ComputeRequest
+  try {
+    body = await request.json() as ComputeRequest
+  } catch {
+    return Response.json({ error: 'invalid_json' }, { status: 400 })
+  }
+
+  const { bookingId, task, system, model, maxTokens } = body
+  if (!bookingId || !task) {
+    return Response.json({ error: 'bookingId and task are required' }, { status: 400 })
+  }
+
+  // Verify booking is active and renter has access
+  const bookingRes = await fetch(`${apiBase}/compute/bookings/${bookingId}`, {
+    headers: { Authorization: `Bearer ${renterToken}` },
+  })
+  if (!bookingRes.ok) {
+    return Response.json({ error: 'Booking not found or access denied' }, { status: 404 })
+  }
+  const bookingData = await bookingRes.json() as any
+  const booking = bookingData?.data?.booking
+  if (!booking) return Response.json({ error: 'Invalid booking response' }, { status: 500 })
+  if (booking.status !== 'active') {
+    return Response.json({ error: `Booking not active (status: ${booking.status})`, status: booking.status }, { status: 409 })
+  }
+
+  // Run through Workers AI
+  const llmModel = model ?? env.LLM_MODEL ?? DEFAULT_LLM_MODEL
+  const systemPrompt = system ?? `You are a specialist AI inference agent on the Brouter Compute Exchange. Provide concise, high-quality responses. You are being paid per request in BSV sats — deliver value.`
+
+  let result: string
+  try {
+    console.log(`[compute][${bookingId}] running via ${llmModel}`)
+    const aiResult = await env.AI.run(llmModel, {
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: task },
+      ],
+      max_tokens: maxTokens ?? 2048,
+      temperature: 0.3,
+    })
+    result = aiResult.response || ''
+  } catch (err) {
+    console.error(`[compute][${bookingId}] AI error:`, err)
+    return Response.json({ error: 'Inference failed', details: String(err) }, { status: 500 })
+  }
+
+  // Record x402 usage (fire-and-forget, non-fatal)
+  if (env.BROUTER_AGENT_TOKEN) {
+    fetch(`${apiBase}/compute/bookings/${bookingId}/usage`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.BROUTER_AGENT_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }).catch(() => {})
+  }
+
+  console.log(`[compute][${bookingId}] done — ${result.length} chars`)
+  return Response.json({ bookingId, result, model: llmModel })
+}
+
 // ====================== MAIN HANDLER ======================
 
 export default {
@@ -284,11 +365,20 @@ export default {
       return Response.json({
         service: 'brouter-runtime',
         status: 'live',
-        version: '1.0.0',
+        version: '1.1.0',
         model: env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
         agents: ALLOWED_AGENTS.size,
         max_calls_per_day: MAX_CALLS_PER_DAY,
+        endpoints: {
+          'POST /callback': 'Agent loop — receives feed, returns actions',
+          'POST /compute': 'Compute Exchange — run inference against an active booking',
+        },
       })
+    }
+
+    // Compute Exchange
+    if (request.method === 'POST' && url.pathname === '/compute') {
+      return handleComputeRequest(request, env)
     }
 
     if (request.method !== 'POST' || url.pathname !== '/callback') {
