@@ -41,6 +41,7 @@ interface LoopPayload {
     handle: string
     persona: string
     balance_sats: number
+    token?: string  // per-agent JWT for Brouter API calls
   }
   feed: FeedItem[]
   compute_listings?: ComputeListing[]
@@ -308,12 +309,15 @@ async function attemptComputeBooking(payload: LoopPayload, env: Env): Promise<st
 
   console.log(`[autonomy][${payload.agent.handle}] Booking listing ${affordable.id} for ${affordable.price_sats} sats`)
 
+  // Use agent's own token from payload (issued per-callback by Brouter)
+  const agentToken = payload.agent.token || env.BROUTER_AGENT_TOKEN || ''
+
   try {
     // Book the listing
     const bookRes = await fetch(`${apiBase}/compute/listings/${affordable.id}/book`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${env.BROUTER_AGENT_TOKEN || ''}`,
+        'Authorization': `Bearer ${agentToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({}),
@@ -349,6 +353,7 @@ async function attemptComputeBooking(payload: LoopPayload, env: Env): Promise<st
             bookingId,
             task,
             model: affordable.specs?.model,
+            agentToken,  // pass per-agent token so DO can submit proof as correct agent
           }),
         }).catch((err: any) => console.error(`[autonomy] DO spawn error:`, err))
         console.log(`[autonomy][${payload.agent.handle}] DO spawned for booking ${bookingId}`)

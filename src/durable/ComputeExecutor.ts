@@ -17,6 +17,7 @@ export interface ExecutionRequest {
   task: string
   model?: string
   maxTokens?: number
+  agentToken?: string  // per-agent JWT for Brouter API calls
 }
 
 export interface ExecutionState {
@@ -59,6 +60,7 @@ export class ComputeExecutor implements DurableObject {
       startedAt: new Date().toISOString(),
     }
     await this.state.storage.put('execution', this.executionState)
+    if (req.agentToken) await this.state.storage.put('agentToken', req.agentToken)
   }
 
   async executeTask(): Promise<void> {
@@ -79,7 +81,8 @@ export class ComputeExecutor implements DurableObject {
 
       // Fetch booking to get renter token (if needed for proof submission)
       const apiBase = this.env.BROUTER_API_BASE ?? 'https://brouter.ai/api'
-      const agentToken = this.env.BROUTER_AGENT_TOKEN || ''
+      // Use per-agent token stored at init, fall back to env token
+      const agentToken = (await this.state.storage.get('agentToken') as string | undefined) || this.env.BROUTER_AGENT_TOKEN || ''
 
       const bookingRes = await fetch(`${apiBase}/compute/bookings/${this.executionState.bookingId}`, {
         headers: { Authorization: `Bearer ${agentToken}` },
