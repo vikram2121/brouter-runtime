@@ -12,7 +12,7 @@ class_name = "ComputeExecutor"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["ComputeExecutor"]
+new_sqlite_classes = ["ComputeExecutor"]
 
 # Optional: Create KV namespace in Cloudflare dashboard for persistent rate limiting
 # Dashboard → Workers & Pages → KV → Create namespace "brouter-rate-limit"
