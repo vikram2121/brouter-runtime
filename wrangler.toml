@@ -6,8 +6,9 @@ workers_dev = true
 [ai]
 binding = "AI"
 
-# Create KV namespace in Cloudflare dashboard, then paste the ID below
+# Optional: Create KV namespace in Cloudflare dashboard for persistent rate limiting
 # Dashboard → Workers & Pages → KV → Create namespace "brouter-rate-limit"
-[[kv_namespaces]]
-binding = "RATE_LIMIT_KV"
-id = "YOUR_KV_NAMESPACE_ID_HERE"
+# Then uncomment and add the ID below
+# [[kv_namespaces]]
+# binding = "RATE_LIMIT_KV"
+# id = "YOUR_KV_NAMESPACE_ID_HERE"

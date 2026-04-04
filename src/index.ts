@@ -21,6 +21,15 @@ export interface Env {
 
 // ====================== TYPES ======================
 
+interface ComputeListing {
+  id: string
+  provider_id: string
+  listing_type: string
+  price_sats: number
+  specs?: Record<string, any>
+  posted_at: string
+}
+
 interface LoopPayload {
   event: string
   dry_run: boolean
@@ -31,6 +40,7 @@ interface LoopPayload {
     balance_sats: number
   }
   feed: FeedItem[]
+  compute_listings?: ComputeListing[]
   open_markets?: OpenMarket[]
   context: {
     your_recent_comments: any[]
@@ -275,6 +285,58 @@ function validateAction(action: Action, payload: LoopPayload): boolean {
   return true
 }
 
+// ====================== AUTONOMY: DETECT & BOOK LISTINGS ======================
+
+async function attemptComputeBooking(payload: LoopPayload, env: Env): Promise<string | null> {
+  const apiBase = env.BROUTER_API_BASE ?? 'https://brouter.ai/api'
+  const listings = payload.compute_listings ?? []
+  
+  if (listings.length === 0) {
+    console.log(`[autonomy][${payload.agent.handle}] No compute listings available`)
+    return null
+  }
+
+  // Pick the first affordable listing (greedy strategy — can be improved with persona-based logic)
+  const affordable = listings.find(l => l.price_sats <= payload.agent.balance_sats)
+  if (!affordable) {
+    console.log(`[autonomy][${payload.agent.handle}] No affordable listings (balance: ${payload.agent.balance_sats} sats)`)
+    return null
+  }
+
+  console.log(`[autonomy][${payload.agent.handle}] Booking listing ${affordable.id} for ${affordable.price_sats} sats`)
+
+  try {
+    // Book the listing
+    const bookRes = await fetch(`${apiBase}/compute/listings/${affordable.id}/book`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.BROUTER_AGENT_TOKEN || ''}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    })
+
+    if (!bookRes.ok) {
+      const errData = await bookRes.text()
+      console.error(`[autonomy][${payload.agent.handle}] Booking failed: ${bookRes.status} ${errData}`)
+      return null
+    }
+
+    const bookingData = await bookRes.json() as any
+    const bookingId = bookingData?.data?.booking?.id
+    if (!bookingId) {
+      console.error(`[autonomy][${payload.agent.handle}] No booking ID in response`)
+      return null
+    }
+
+    console.log(`[autonomy][${payload.agent.handle}] Booking created: ${bookingId}`)
+    return bookingId
+  } catch (err) {
+    console.error(`[autonomy][${payload.agent.handle}] Booking error:`, err)
+    return null
+  }
+}
+
 // ====================== COMPUTE HANDLER ======================
 
 interface ComputeRequest {
@@ -426,7 +488,15 @@ export default {
       return Response.json({ event: payload.event, actions: [] })
     }
 
-    // 6. LLM call
+    // 6. Autonomy: Attempt compute booking (fire-and-forget)
+    const bookingId = await attemptComputeBooking(payload, env)
+    if (bookingId) {
+      console.log(`[runtime][${payload.agent.handle}] Compute booking initiated: ${bookingId}`)
+      // TODO: Execute task and submit proof in background (Phase 4-5)
+      // For now, log and continue to LLM loop
+    }
+
+    // 7. LLM call
     const systemPrompt = buildSystemPrompt(payload.agent.persona, payload.agent.handle)
     const userMessage  = buildUserMessage(payload)
 
@@ -448,7 +518,7 @@ export default {
       return Response.json({ event: payload.event, actions: [] })
     }
 
-    // 7. Parse & validate
+    // 8. Parse & validate
     let parsed: { reasoning?: string; actions: Action[] }
     try {
       const clean = rawResponse.replace(/```json|```/g, '').trim()
