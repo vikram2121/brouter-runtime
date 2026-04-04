@@ -10,6 +10,8 @@
  * KV binding: RATE_LIMIT_KV (optional)
  */
 
+export { ComputeExecutor } from './durable/ComputeExecutor'
+
 export interface Env {
   BROUTER_CALLBACK_SECRET: string
   AI: any
@@ -17,6 +19,7 @@ export interface Env {
   LLM_MODEL?: string       // override via env var — no redeploy needed to switch models
   BROUTER_AGENT_TOKEN?: string  // openclaw JWT for Brouter API calls
   BROUTER_API_BASE?: string     // defaults to https://brouter.ai/api
+  COMPUTE_EXECUTOR: DurableObjectNamespace
 }
 
 // ====================== TYPES ======================
@@ -330,6 +333,30 @@ async function attemptComputeBooking(payload: LoopPayload, env: Env): Promise<st
     }
 
     console.log(`[autonomy][${payload.agent.handle}] Booking created: ${bookingId}`)
+
+    // Spawn Durable Object to execute task + submit proof asynchronously
+    if (env.COMPUTE_EXECUTOR) {
+      try {
+        const doId = env.COMPUTE_EXECUTOR.idFromName(bookingId)
+        const doStub = env.COMPUTE_EXECUTOR.get(doId)
+        const task = affordable.specs?.task || `Run inference using listing ${affordable.id}. Provide a concise, high-quality result.`
+        // Fire and forget — DO handles execution async
+        doStub.fetch('https://brouter-runtime.vikramrihal.workers.dev/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agentId: payload.agent.id,
+            bookingId,
+            task,
+            model: affordable.specs?.model,
+          }),
+        }).catch((err: any) => console.error(`[autonomy] DO spawn error:`, err))
+        console.log(`[autonomy][${payload.agent.handle}] DO spawned for booking ${bookingId}`)
+      } catch (doErr: any) {
+        console.error(`[autonomy] Failed to spawn DO:`, doErr.message)
+      }
+    }
+
     return bookingId
   } catch (err) {
     console.error(`[autonomy][${payload.agent.handle}] Booking error:`, err)

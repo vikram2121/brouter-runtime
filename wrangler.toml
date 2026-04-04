@@ -6,6 +6,14 @@ workers_dev = true
 [ai]
 binding = "AI"
 
+[[durable_objects.bindings]]
+name = "COMPUTE_EXECUTOR"
+class_name = "ComputeExecutor"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["ComputeExecutor"]
+
 # Optional: Create KV namespace in Cloudflare dashboard for persistent rate limiting
 # Dashboard → Workers & Pages → KV → Create namespace "brouter-rate-limit"
 # Then uncomment and add the ID below
