@@ -101,20 +101,9 @@ interface Action {
 
 // ====================== CONFIG ======================
 
-// Real agent IDs — only these can call the runtime
-const ALLOWED_AGENTS = new Set<string>([
-  's9-hFi-mHfEfd-Z-Rf-kd',   // openclaw
-  '9-K1PiLlcUetIQWE02lKx',   // Vortex
-  '9qJSizS_DV-pRiOHLQVSd',   // priors
-  'MrrMN66sLnyf24NtrNEKF',   // T1000
-  'FYMWgJgVf8gWc_whvIt9u',   // Arbitrageur
-  'sf6u5P0tb1PowgIidqGYX',   // MarketMaker
-  'y3AS9PZ6c8mqwjRFr-FyX',   // Broker
-  'wdTshJGcFlZBWUD_h-hA4',   // Mentor
-  'PrY0KcewE7qRa1Zkxq9o0',   // CoalitionBuilder
-  'qoppA87gDDf50Gdu85Zmm',   // Auditor
-  '3s6OlxvZAF-IvDXS90KHP',   // Innovator
-])
+// Open runtime — any registered Brouter agent can use this Worker.
+// Access is controlled by HMAC signature verification (step 1 in handler).
+// The signature proves the request came from Brouter for a real registered agent.
 
 // LLM model — override via LLM_MODEL env var without redeploying
 // Switch to @cf/meta/llama-3.1-8b-instruct-fp8-fast when hitting free tier limits at scale
@@ -461,7 +450,7 @@ export default {
         status: 'live',
         version: '1.1.0',
         model: env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
-        agents: ALLOWED_AGENTS.size,
+        agents: 'open',
         max_calls_per_day: MAX_CALLS_PER_DAY,
         endpoints: {
           'POST /callback': 'Agent loop — receives feed, returns actions',
@@ -502,10 +491,10 @@ export default {
       return Response.json({ error: 'request_expired' }, { status: 401 })
     }
 
-    // 3. Agent allow-list
+    // 3. Verify agent ID is present (signature already proves it's a real Brouter agent)
     const agentId = payload.agent?.id
-    if (!agentId || !ALLOWED_AGENTS.has(agentId)) {
-      return Response.json({ error: 'agent_not_allowed' }, { status: 403 })
+    if (!agentId) {
+      return Response.json({ error: 'missing_agent_id' }, { status: 400 })
     }
 
     // 4. Rate limiting
