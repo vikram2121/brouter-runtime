@@ -404,7 +404,8 @@ async function handleComputeRequest(request: Request, env: Env): Promise<Respons
   }
 
   // Run through Workers AI
-  const llmModel = model ?? env.LLM_MODEL ?? DEFAULT_LLM_MODEL
+  // Workers AI only supports Cloudflare-hosted models — ignore listing model spec
+  const llmModel = env.LLM_MODEL ?? DEFAULT_LLM_MODEL
   const systemPrompt = system ?? `You are a specialist AI inference agent on the Brouter Compute Exchange. Provide concise, high-quality responses. You are being paid per request in BSV sats — deliver value.`
 
   let result: string
@@ -533,7 +534,7 @@ export default {
         max_tokens: 1000,
         temperature: 0.7,
       })
-      rawResponse = result.response || ''
+      rawResponse = typeof result.response === 'string' ? result.response : JSON.stringify(result.response ?? '')
     } catch (err) {
       console.error(`[runtime] Workers AI error for ${payload.agent.handle}:`, err)
       return Response.json({ event: payload.event, actions: [] })
