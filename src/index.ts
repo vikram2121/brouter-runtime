@@ -16,7 +16,8 @@ export interface Env {
   BROUTER_CALLBACK_SECRET: string
   AI: any
   RATE_LIMIT_KV?: KVNamespace
-  LLM_MODEL?: string       // override via env var — no redeploy needed to switch models
+  LLM_MODEL?: string         // override via env var — no redeploy needed to switch models
+  OPENROUTER_API_KEY?: string // if set, use OpenRouter instead of Workers AI
   BROUTER_AGENT_TOKEN?: string  // openclaw JWT for Brouter API calls
   BROUTER_API_BASE?: string     // defaults to https://brouter.ai/api
   COMPUTE_EXECUTOR: DurableObjectNamespace
@@ -108,6 +109,37 @@ interface Action {
 // LLM model — override via LLM_MODEL env var without redeploying
 // Switch to @cf/meta/llama-3.1-8b-instruct-fp8-fast when hitting free tier limits at scale
 const DEFAULT_LLM_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+const OPENROUTER_MODEL = 'qwen/qwen3-235b-a22b'
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
+
+/** Call OpenRouter if OPENROUTER_API_KEY is set, else fall back to Workers AI */
+async function callLLM(
+  env: Env,
+  messages: { role: string; content: string }[],
+  maxTokens = 1000,
+  temperature = 0.7
+): Promise<string> {
+  if (env.OPENROUTER_API_KEY) {
+    const model = env.LLM_MODEL ?? OPENROUTER_MODEL
+    const resp = await fetch(OPENROUTER_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://brouter.ai',
+        'X-Title': 'Brouter Runtime',
+      },
+      body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature }),
+    })
+    if (!resp.ok) throw new Error(`OpenRouter error ${resp.status}: ${await resp.text()}`)
+    const data = await resp.json() as any
+    return data.choices?.[0]?.message?.content ?? ''
+  }
+  // Fallback: Workers AI
+  const model = env.LLM_MODEL ?? DEFAULT_LLM_MODEL
+  const result = await env.AI.run(model, { messages, max_tokens: maxTokens, temperature })
+  return typeof result.response === 'string' ? result.response : JSON.stringify(result.response ?? '')
+}
 
 // Max calls per agent per day
 // Free tier ceiling: ~250 agents at 6 calls/day. Raise limit or switch model when scaling.
@@ -404,22 +436,17 @@ async function handleComputeRequest(request: Request, env: Env): Promise<Respons
   }
 
   // Run through Workers AI
-  // Workers AI only supports Cloudflare-hosted models — ignore listing model spec
-  const llmModel = env.LLM_MODEL ?? DEFAULT_LLM_MODEL
+    // Run LLM — prefer OpenRouter if API key set, else Workers AI
+  const activeModel = env.OPENROUTER_API_KEY ? (env.LLM_MODEL ?? OPENROUTER_MODEL) : (env.LLM_MODEL ?? DEFAULT_LLM_MODEL)
   const systemPrompt = system ?? `You are a specialist AI inference agent on the Brouter Compute Exchange. Provide concise, high-quality responses. You are being paid per request in BSV sats — deliver value.`
 
   let result: string
   try {
-    console.log(`[compute][${bookingId}] running via ${llmModel}`)
-    const aiResult = await env.AI.run(llmModel, {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: task },
-      ],
-      max_tokens: maxTokens ?? 2048,
-      temperature: 0.3,
-    })
-    result = aiResult.response || ''
+    console.log(`[compute][${bookingId}] running via ${activeModel}`)
+    result = await callLLM(env, [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: task },
+    ], maxTokens ?? 2048, 0.3)
   } catch (err) {
     console.error(`[compute][${bookingId}] AI error:`, err)
     return Response.json({ error: 'Inference failed', details: String(err) }, { status: 500 })
@@ -435,7 +462,7 @@ async function handleComputeRequest(request: Request, env: Env): Promise<Respons
   }
 
   console.log(`[compute][${bookingId}] done — ${result.length} chars`)
-  return Response.json({ bookingId, result, model: llmModel })
+  return Response.json({ bookingId, result, model: activeModel })
 }
 
 // ====================== MAIN HANDLER ======================
@@ -524,17 +551,12 @@ export default {
 
     let rawResponse: string
     try {
-      const model = env.LLM_MODEL ?? DEFAULT_LLM_MODEL
-      console.log(`[runtime][${payload.agent.handle}] calling ${model}`)
-      const result = await env.AI.run(model, {
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userMessage },
-        ],
-        max_tokens: 1000,
-        temperature: 0.7,
-      })
-      rawResponse = typeof result.response === 'string' ? result.response : JSON.stringify(result.response ?? '')
+      const activeModel = env.OPENROUTER_API_KEY ? (env.LLM_MODEL ?? OPENROUTER_MODEL) : (env.LLM_MODEL ?? DEFAULT_LLM_MODEL)
+      console.log(`[runtime][${payload.agent.handle}] calling ${activeModel}`)
+      rawResponse = await callLLM(env, [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: userMessage },
+      ], 1000, 0.7)
     } catch (err) {
       console.error(`[runtime] Workers AI error for ${payload.agent.handle}:`, err)
       return Response.json({ event: payload.event, actions: [] })
